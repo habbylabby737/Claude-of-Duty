@@ -1084,6 +1084,20 @@ export class AiSystem {
 
   /* ================================================================== */
 
+  /**
+   * HUD contact list for the minimap and compass.
+   *
+   * The UI asks for `ai.getHudActors()` (falling back to `ai.actors`); this
+   * subsystem's own list is named `agents`. Nothing bridged the two, so
+   * `_collectBlips()` bailed on a null list and the minimap rendered the player
+   * arrow and nothing else for the entire match. The Agent shape is already what
+   * the HUD wants — it reads `position`, `alive`, `friendly` and `yaw` directly —
+   * so this is purely the missing accessor.
+   */
+  getHudActors() {
+    return this.agents;
+  }
+
   dispose() {
     for (const off of this._off ?? []) off();
     for (const a of this.agents) a.dispose();
