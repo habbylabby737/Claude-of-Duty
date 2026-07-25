@@ -13,6 +13,7 @@ import { WorldMarkers } from './markers.js';
 import { Prompt, Banner } from './prompts.js';
 import { PauseMenu } from './menu.js';
 import { CombatDemo } from './demo.js';
+import { AudioToggle } from './audiotoggle.js';
 
 const MAX_BLIPS = 48;
 
@@ -71,6 +72,11 @@ export class UiSystem {
 
     const host = document.getElementById('ui') ?? document.body;
     this.root = el('div', 'ow-hud', host);
+
+    // Mounted on `host`, NOT on `this.root`: the HUD is pointer-events:none and
+    // fades behind the menu, and the mute control must stay clickable and visible
+    // in both states. Press M anywhere, or click it when the cursor is free.
+    this.audioToggle = new AudioToggle(ctx, host);
 
     // Stacking order: hurt overlays sit under the HUD, the menu over everything.
     this.hurtLayer = el('div', 'ow-layer', this.root);
@@ -405,6 +411,10 @@ export class UiSystem {
     const s = this.state;
     s.time = t.elapsed;
 
+    // The audio graph is created on the first user gesture, at the mixer's own
+    // default gain — which silently discards a mute chosen before that. Re-assert.
+    this.audioToggle?.sync();
+
     // ---- pause -----------------------------------------------------------
     if (ctx.input.enabled && !ctx.input.frozen) {
       if (ctx.input.actionPressed('pause')) this.menu.toggle();
@@ -607,6 +617,7 @@ export class UiSystem {
     this.prompt.dispose();
     this.banner.dispose();
     this.menu.dispose();
+    this.audioToggle?.dispose();
     this.root.remove();
     removeStyles();
   }
