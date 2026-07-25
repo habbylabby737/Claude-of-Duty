@@ -321,6 +321,14 @@ export class AiSystem {
       if (!e || !e.target || !(e.target instanceof Agent)) return;
       const a = e.target;
       if (!a.alive) return;
+      // Friendly fire guard. `Agent.team` was assigned at spawn and never read,
+      // so every round that clipped a squadmate applied full damage: measured
+      // 25/25 agent damage events same-team, 5 of 6 enemies dead inside 20s with
+      // the player idle. The garrison was wiping itself out before contact.
+      if (e.source instanceof Agent && e.source !== a && e.source.team === a.team) {
+        this.stats.friendlyBlocked = (this.stats.friendlyBlocked ?? 0) + 1;
+        return;
+      }
       const amount = e.amount * this._falloff(e.point);
       a.applyDamage(amount, e.headshot ? 'head' : e.part ?? 'torso', e.point ?? a.position, e.incident);
       if (!a.alive) e.killed = true;
@@ -611,6 +619,7 @@ export class AiSystem {
         penetration: 0.9,
         maxDist: 200,
         mask: phys.MASK.BULLET,
+        source: agent,
       });
       if (impacts.length) end = impacts[0].point;
     }
