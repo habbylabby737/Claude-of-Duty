@@ -17,9 +17,16 @@ Upstream ground truth for comparison: `../original` (read-only, never commit the
 | 4 | Minimap draws no blips of any kind | **Contract mismatch**: UI calls `ai.getHudActors()` / `ai.actors`; AI exposes `ai.agents`. Neither name existed → `_collectBlips()` bailed on a null list | blipCount > 0 in normal (non-capture) play | **CLOSED** — 6 agents → 6 blips, first at (−18.3, −30.6) kind `enemy` |
 | 5 | Ships at `ultra` (~14fps) with no adaptive scaler | `DEFAULTS.quality: 'ultra'`; only `setQuality` caller is the settings menu | default measured best-of-preset | **CLOSED (partial)** — default now `medium`; see loop #6 |
 
+| 6 | No way to silence the game — audio played with no mute control anywhere | `setMasterVolume()`/`setBusVolume()` implemented and correct; settings menu had quality/sensitivity/FOV and **no audio section**, so nothing ever called them | mute button + `M` key toggle master volume and survive a reload | **CLOSED** — `src/ui/audiotoggle.js`; verified 0.95→0, no drift, persisted mute applied the instant the graph starts |
+
 **Fix:** new `src/match/index.js` (`MatchSystem`) owns the seam — round clock, `scoreThem`,
 death→respawn cycle. Plus `ai.getHudActors()` accessor and the measured quality default.
 Nothing gameplay-related was re-implemented; existing correct code was connected.
+
+**Sub-defect found while building the mute** (worth its own note): the Web Audio graph is not
+created until a user gesture and comes up at the mixer's own default gain, so a mute chosen before
+that moment was silently discarded and audio started anyway — button still reading MUTED. Fixed by
+`AudioToggle.sync()` from `UiSystem.lateUpdate`, which re-asserts on drift. Init-order-independent.
 
 ---
 
@@ -33,7 +40,8 @@ Nothing gameplay-related was re-implemented; existing correct code was connected
 | 9 | `ui.setObjectives()` implemented but called **only from `ui/demo.js`** (the screenshot mock) | `grep -rn setObjectives src/` | objectives driven in real play, or the API removed | Claude | OPEN |
 | 10 | Killfeed names are hardcoded placeholders (`YOU` / `ENEMY` / `OPERATOR`); two rows can be byte-identical | `src/ui/index.js` killfeed push | agents carry identities | Claude | OPEN |
 | 11 | EV100 auto-exposure metering measurably inert — full-screen flash moved frame mean 23% while distant pixels moved 0.16%; no adaptation ramp | phase-1 forensics on 224 native frames | measured adaptation ramp after a luminance step | Claude | OPEN |
-| 12 | Red-team sweep in flight (`wf_31b18790-33e`) — 6 static reviewers + 3 live drivers + adversarial verify | workflow journal | fix queue merged into this ledger | Claude | **IN PROGRESS** |
+| 12 | Red-team sweep in flight (`wf_31b18790-33e`). 6 static reviewers + 6 adversarial verifiers **DONE: 53 raw findings → 42 verified (~21% refuted)**. Awaiting 3 live behavioural drivers + the inventory synthesiser | workflow journal, 12/16 results | prioritised fix queue merged into this ledger and Batch 2 started | Claude | **IN PROGRESS — this is the next action on return** |
+| 13 | 5 of 59 red-team agent scripts launch Chromium without `--mute-audio` (`av-probe1–4`, `vd0_probe`) | audit of `scratchpad/rt/*.mjs` | all agent-authored browser launches muted | Claude | OPEN — root cause was my own prompt omitting the arg; see the global NOISE LAW |
 
 ---
 
