@@ -59,6 +59,7 @@ const snap = () =>
       // whether any of that damage is APPLIED.
       totalHp: (ai?.agents ?? []).reduce((n, a) => n + Math.max(0, a.health ?? 0), 0),
       friendlyBlocked: ai?.stats?.friendlyBlocked ?? 0,
+      friendlyBlastBlocked: ai?.stats?.friendlyBlastBlocked ?? 0,
       scoreUs: ui?.state?.scoreUs ?? null,
       shotsFired: w?.stats?.fired ?? null,
       rc1: window.__RC1__,
@@ -92,10 +93,13 @@ ck(
   t1.totalHp === t0.totalHp,
   `totalHp ${t0.totalHp} -> ${t1.totalHp}; ${t1.friendlyBlocked} friendly rounds blocked out of ${t1.rc1?.sameTeam} same-team hits`
 );
+// Non-vacuity across BOTH damage paths. Bullets alone were not enough: once the
+// nav fix let agents move and use grenades, the garrison lost 206 HP in 30s with
+// zero friendly BULLETS blocked — the blast path had no team guard at all.
 ck(
-  'the guard actually fired (test is not vacuous)',
-  (t1.friendlyBlocked ?? 0) > 0,
-  `friendlyBlocked=${t1.friendlyBlocked} — if 0, no friendly fire occurred and this run proves nothing`
+  'a friendly-fire guard actually fired (test is not vacuous)',
+  (t1.friendlyBlocked ?? 0) + (t1.friendlyBlastBlocked ?? 0) > 0,
+  `bullets=${t1.friendlyBlocked} blasts=${t1.friendlyBlastBlocked} — if both 0, no friendly fire occurred and this run proves nothing`
 );
 ck(
   'no anonymous damage events',

@@ -342,6 +342,17 @@ export class AiSystem {
         const d = a.position.distanceTo(e.position) + 0.001;
         a.hear(e.position, 120);
         if (d > radius) continue;
+        // Same guard as the bullet path. `_updateGrenades` already puts
+        // `source: g.agent` on the payload and this handler ignored it, so a
+        // 120-damage / 6.5m blast hit the thrower's own squad at full strength.
+        // Invisible until the nav fix let agents move and actually use grenades:
+        // the garrison then lost 206 HP in 30s with the player idle and not one
+        // friendly BULLET blocked. Agents have no friendly-blast avoidance in
+        // targeting, so self-damage here is a defect, not difficulty.
+        if (e.source instanceof Agent && e.source.team === a.team) {
+          this.stats.friendlyBlastBlocked = (this.stats.friendlyBlastBlocked ?? 0) + 1;
+          continue;
+        }
         if (this.phys && !this.phys.lineOfSight(e.position, a.eye, this.phys.MASK.EXPLOSION)) continue;
         const f = 1 - d / radius;
         this._v.copy(a.position).sub(e.position).normalize();
@@ -493,11 +504,34 @@ export class AiSystem {
     const spawns = world?.spawnPoints ?? [];
     if (!spawns.length || !this.grid) return 0;
     const player = this.playerPosition(this._v3).clone();
+
+    // Spawns must be on the SAME walkable island as the player, or the squad is
+    // stranded before it starts. Measured on the unfixed build: 2 of 6 agents
+    // spawned inside 10-21 cell islands and never reached the fight at all.
+    const g = this.grid;
+    const playerComp = (() => {
+      if (!g?.comp) return -1;
+      const at = g.nearest(player.x, player.z, player.y);
+      return at >= 0 ? g.comp[at] : -1;
+    })();
+    const reachable = (pos) => {
+      if (playerComp < 0 || !g?.comp) return true; // unlabelled grid: no new restriction
+      const at = g.nearest(pos.x, pos.z, pos.y);
+      return at >= 0 && g.comp[at] === playerComp;
+    };
+
     // rank the spawn points by distance from the player, take the far half
-    const ranked = spawns
+    let ranked = spawns
       .map((s, i) => ({ s, i, d: s.position.distanceTo(player) }))
       .sort((a, b) => b.d - a.d)
       .filter((e) => e.d > 18);
+    const beforeReach = ranked.length;
+    const connected = ranked.filter((e) => reachable(e.s.position));
+    // Only apply the filter if it leaves us something to work with — a level
+    // whose spawns are all off-island should still populate rather than silently
+    // produce an empty garrison.
+    if (connected.length) ranked = connected;
+    this.stats.spawnsRejectedUnreachable = beforeReach - connected.length;
     if (!ranked.length) return 0;
 
     const variants = ['vanguard', 'irregular', 'breacher'];
@@ -519,12 +553,32 @@ export class AiSystem {
       for (const o of others) route.push(o.s.position.clone());
 
       for (let m = 0; m < per; m++) {
-        const jitterA = this.rng.range(0, Math.PI * 2);
-        const jitterR = this.rng.range(0.8, 3.2);
-        const p = anchor.position
-          .clone()
-          .add(new THREE.Vector3(Math.cos(jitterA) * jitterR, 0, Math.sin(jitterA) * jitterR));
-        const ci = this.grid.nearest(p.x, p.z, anchor.position.y, 6, 1.4);
+        // Filtering the ANCHOR is not enough: the 0.8-3.2m scatter below can
+        // land on a neighbouring island, and grid.nearest() will happily snap to
+        // a cell on a different component. That is how an agent still ended up
+        // stranded after the anchors were filtered. Resample the jitter until it
+        // lands on the player island, then fall back to the anchor cell itself.
+        const p = new THREE.Vector3();
+        let ci = -1;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const jitterA = this.rng.range(0, Math.PI * 2);
+          const jitterR = this.rng.range(0.8, 3.2);
+          p.copy(anchor.position).add(
+            new THREE.Vector3(Math.cos(jitterA) * jitterR, 0, Math.sin(jitterA) * jitterR)
+          );
+          const c = this.grid.nearest(p.x, p.z, anchor.position.y, 6, 1.4);
+          if (c < 0) continue;
+          if (playerComp < 0 || !g?.comp || g.comp[c] === playerComp) {
+            ci = c;
+            break;
+          }
+        }
+        if (ci < 0) {
+          // Every scatter sample was off-island: stand on the anchor itself,
+          // which reachable() already vetted.
+          ci = this.grid.nearest(anchor.position.x, anchor.position.z, anchor.position.y, 6, 1.4);
+          this.stats.spawnFellBackToAnchor = (this.stats.spawnFellBackToAnchor ?? 0) + 1;
+        }
         if (ci >= 0) {
           p.set(
             this.grid.worldX(ci % this.grid.nx),
@@ -532,6 +586,7 @@ export class AiSystem {
             this.grid.worldZ((ci / this.grid.nx) | 0)
           );
         } else {
+          p.copy(anchor.position);
           p.y = this.groundAt(p.x, p.z, anchor.position.y + 4);
         }
         const a = this.spawn(variants[(q * per + m) % variants.length], p, anchor.yaw + this.rng.signed() * 0.7, {

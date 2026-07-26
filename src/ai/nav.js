@@ -100,6 +100,12 @@ export class NavGrid {
     const n = this.nx * this.nz;
     /** 0 = blocked, 1 = walkable standing, 2 = walkable crouched only */
     this.flags = new Uint8Array(n);
+    /** Connected-component id per cell; -1 = unwalkable. Filled by labelComponents(). */
+    this.comp = null;
+    this.compSize = [];
+    this.componentCount = 0;
+    /** Path requests rejected O(1) as cross-component instead of burning a solve. */
+    this.rejectedUnreachable = 0;
     this.floor = new Float32Array(n);
     this.floor.fill(-Infinity);
     /** how enclosed a cell is: 0 open, 1 hemmed in — used for cover scoring */
@@ -181,8 +187,88 @@ export class NavGrid {
       }
     }
     this.walkableCount = walk;
+    this.labelComponents();
     this.buildMs = performance.now() - t0;
     return this;
+  }
+
+  /**
+   * Label connected components over the walkable set.
+   *
+   * Nothing in this file ever asked "can the agent actually GET there". Cover
+   * points were scored by straight-line distance, findPath was handed goals it
+   * could never reach, and spawns were placed without a reachability test.
+   * Measured on this level: ~800 separate components, 23% of walkable cells
+   * stranded on islands, 3811 of 3872 cover picks cross-component, and 2718 of
+   * 2719 path failures cross-component. Agents stood in the open, jogged in
+   * place, and re-picked the same unreachable cover every frame while the A*
+   * budget drained on solves that could not succeed.
+   *
+   * The traversal rule here is deliberately IDENTICAL to findPath's inner loop —
+   * 8-way, walkable(), no corner cutting, same maxStep height gate. If the two
+   * ever diverge the component map becomes a liar, which is worse than not
+   * having one: it would reject routes A* could actually find.
+   */
+  labelComponents() {
+    const n = this.flags.length;
+    const nx = this.nx;
+    const comp = (this.comp = new Int32Array(n).fill(-1));
+    const sizes = (this.compSize = []);
+    const stack = [];
+
+    for (let seed = 0; seed < n; seed++) {
+      if (comp[seed] !== -1) continue;
+      const sx = seed % nx, sz = (seed / nx) | 0;
+      if (!this.walkable(sx, sz)) continue;
+
+      const id = sizes.length;
+      let count = 0;
+      comp[seed] = id;
+      stack.push(seed);
+
+      while (stack.length) {
+        const cur = stack.pop();
+        count++;
+        const cxi = cur % nx, czi = (cur / nx) | 0;
+        const cy = this.floor[cur];
+        for (let d = 0; d < 8; d++) {
+          const dx = DX[d], dz = DZ[d];
+          const ix = cxi + dx, iz = czi + dz;
+          if (!this.walkable(ix, iz)) continue;
+          if (dx && dz) {
+            if (!this.walkable(cxi + dx, czi) || !this.walkable(cxi, czi + dz)) continue;
+          }
+          const ni = this.index(ix, iz);
+          if (comp[ni] !== -1) continue;
+          if (Math.abs(this.floor[ni] - cy) > this.maxStep) continue;
+          comp[ni] = id;
+          stack.push(ni);
+        }
+      }
+      sizes.push(count);
+    }
+
+    this.componentCount = sizes.length;
+    this.largestComponent = sizes.length ? sizes.indexOf(Math.max(...sizes)) : -1;
+    return this;
+  }
+
+  /** Component id at a cell, or -1 when unwalkable / out of bounds. */
+  componentAt(ix, iz) {
+    if (!this.comp || !this.inside(ix, iz)) return -1;
+    return this.comp[this.index(ix, iz)];
+  }
+
+  /**
+   * True when b is reachable from a on foot. Unlabelled grids answer `true` so
+   * this can never make an unlabelled build stricter than it was before.
+   */
+  connected(aIndex, bIndex) {
+    if (!this.comp) return true;
+    const ca = this.comp[aIndex];
+    const cb = this.comp[bIndex];
+    if (ca === -1 || cb === -1) return false;
+    return ca === cb;
   }
 
   walkable(ix, iz, crouch = true) {
@@ -237,6 +323,15 @@ export class NavGrid {
     if (start === goal) {
       this._emit(out, 0, to);
       return 1;
+    }
+    // Reject cross-component goals before spending a solve on them. 2718 of
+    // 2719 measured path failures on this level were unreachable-by-construction,
+    // and each one burned the whole A* node budget expanding an island before
+    // giving up — which is what starved the 2-solves-per-frame ration and left
+    // agents in permanent `pathPending`. O(1) instead of O(maxNodes).
+    if (!this.connected(start, goal)) {
+      this.rejectedUnreachable++;
+      return 0;
     }
     const nx = this.nx;
     const gx = goal % nx, gz = (goal / nx) | 0;
@@ -418,6 +513,11 @@ export class CoverMap {
             dist: low.distance,
             claimed: -1,
             score: 0,
+            // Which walkable island this cover sits on. Cover was previously
+            // scored on straight-line distance alone, so 3811 of 3872 measured
+            // picks were on an island the agent could not reach — it walked at a
+            // wall, gave up, re-picked the same point, forever.
+            comp: g.componentAt(ix, iz),
           });
           break;
         }
@@ -444,9 +544,26 @@ export class CoverMap {
     let best = null;
     let bestScore = -Infinity;
     const tx = threat.x, tz = threat.z;
+    // The asker's own island. Cover on any other one is unreachable on foot, no
+    // matter how good its score — rejecting it here is what stops the pick /
+    // walk-at-a-wall / re-pick loop and stops feeding A* solves that must fail.
+    // Resolve the asker's cell with nearest(), exactly as findPath does — an
+    // agent's literal cell can round to unwalkable, and disagreeing with the
+    // pathfinder about where someone stands would reintroduce the bug.
+    const g = this.grid;
+    let fromComp = -1;
+    if (g?.comp) {
+      const at = g.nearest(pos.x, pos.z, pos.y ?? null);
+      if (at >= 0) fromComp = g.comp[at];
+    }
+    this.rejectedUnreachable = this.rejectedUnreachable ?? 0;
     for (let i = 0; i < this.points.length; i++) {
       const p = this.points[i];
       if (p.claimed >= 0 && p.claimed !== claimId) continue;
+      if (fromComp >= 0 && p.comp >= 0 && p.comp !== fromComp) {
+        this.rejectedUnreachable++;
+        continue;
+      }
       const toThreatX = tx - p.x, toThreatZ = tz - p.z;
       const dT = Math.hypot(toThreatX, toThreatZ);
       if (dT < 2.5 || dT > 40) continue;
