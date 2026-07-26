@@ -19,7 +19,12 @@
   ],
 
   "_events_reasons": {
-    "_none_yet": "No event is allow-listed. Every orphaned emit currently reported is either an open defect (ui:pause, ai:bark, player:heartbeat) or an extension point I introduced and have not yet justified (match:end, player:respawn). Allow-listing my own orphans would be exactly the excuse this gate exists to refuse."
+    "ui:pause": "SUPPLEMENTARY, verified not a defect. The gate flagged this and I wrongly concluded the game never pauses (menu.js:183 even says 'while the game is frozen', and grepping engine.js for 'time.scale' found nothing). Reading the code refuted it: menu.open() sets t.scale=0 and calls player.setControlEnabled(false); engine.js:125 computes t.dt = rawDt * t.scale, so update/lateUpdate receive dt=0 AND engine.js:130 _accum += t.dt keeps the fixed-step loop from running at all. Physics and AI both freeze. My grep missed it because the code aliases this.time to `t`. The event is a notification for anyone who wants it.",
+    "ui:quality": "SUPPLEMENTARY. menu.js:136 calls ctx.config.setQuality(name) DIRECTLY, then emits. The setting applies without any listener.",
+    "ui:sensitivity": "SUPPLEMENTARY. menu.js:42 assigns ctx.config.sensitivity directly, then emits.",
+    "ui:fov": "SUPPLEMENTARY. menu.js:48 assigns ctx.config.fov and updates the camera directly, then emits.",
+    "ui:setting": "SUPPLEMENTARY. Generic settings-changed notification; every individual setting is already applied at its own call site.",
+    "_still_open": "player:health, player:heartbeat, sky:changed, sky:env and the ai:bark dead subscription are NOT allow-listed - they have not been adjudicated yet and stay red until they are."
   },
-  "events": []
+  "events": ["ui:pause", "ui:quality", "ui:sensitivity", "ui:fov", "ui:setting"]
 }

@@ -46,6 +46,15 @@ import { Agent, STATE } from './agent.js';
 import { Squad } from './squad.js';
 import { GroundShadows } from './grounding.js';
 
+/**
+ * Seconds a corpse stays before it is disposed and spliced out. Long enough that
+ * a kill reads as a kill and the ragdoll settles (it sleeps at ~1.2s), short
+ * enough that a long match does not accumulate bodies forever.
+ */
+const CORPSE_LINGER = 14;
+/** Quiet beat after the garrison is cleared, before the next squad arrives. */
+const REINFORCE_DELAY = 6;
+
 export class AiSystem {
   static id = 'ai';
   static deps = ['physics', 'world'];
@@ -75,6 +84,9 @@ export class AiSystem {
     this.debugLog = false;
     /** dev: force the garrison to spawn even in deterministic capture runs */
     this.forcePopulate = false;
+    /** Send a fresh squad once the garrison is cleared. Off in capture runs. */
+    this.reinforce = true;
+    this._clearFor = 0;
     this._navPending = true;
     this.stats = { agents: 0, alive: 0, navMs: 0, coverPts: 0, walkable: 0 };
 
@@ -824,11 +836,47 @@ export class AiSystem {
               `at y=${b.miny.toFixed(2)} sleeping=${a.ragdoll.sleeping}`
           );
         }
+        // Retire the corpse. `deadTime` was accumulated and fed NOTHING but the
+        // debug log above: no splice existed anywhere, and populate() only ever
+        // ran at boot. So bodies accumulated forever while the roster only ever
+        // shrank, and the level emptied permanently — a match you could not lose
+        // and, after the last kill, could not fight.
+        if (a.deadTime > CORPSE_LINGER) {
+          a.squad?.remove?.(a);
+          a.dispose();
+          this.agents.splice(i, 1);
+          i--;
+          this.stats.retired = (this.stats.retired ?? 0) + 1;
+        }
       }
     }
     this._updateGrenades(dt);
+    this._updateReinforcements(dt, alive);
     this.stats.agents = this.agents.length;
     this.stats.alive = alive;
+  }
+
+  /**
+   * Send a fresh squad once the garrison is cleared.
+   *
+   * `populate()` was written to be re-runnable — it re-ranks spawn points from
+   * the player's CURRENT position each call — but nothing ever called it after
+   * boot. Reinforcing on a timer rather than instantly gives the player the beat
+   * of quiet that makes a wave read as a wave.
+   */
+  _updateReinforcements(dt, alive) {
+    if (!this.reinforce || this._navPending) return;
+    if (alive > 0) {
+      this._clearFor = 0;
+      return;
+    }
+    this._clearFor += dt;
+    if (this._clearFor < REINFORCE_DELAY) return;
+    this._clearFor = 0;
+    const made = this.populate({ squads: 1, perSquad: 3 });
+    // No 'ai:reinforce' emit: nothing consumes it and the wiring gate would
+    // (correctly) flag it as an orphan. Read ai.stats.waves if you need this.
+    if (made) this.stats.waves = (this.stats.waves ?? 0) + 1;
   }
 
   lateUpdate() {
