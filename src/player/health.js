@@ -134,6 +134,15 @@ export class Health {
 
   heal(amount) {
     this.value = Math.min(this.max, this.value + amount);
+    // Clearing `dead` is the whole point of healing back above zero. Without it
+    // heal(100) minted a 100-HP corpse: `damage()` returns 0 while dead, the
+    // regen branch is gated on !dead, the hitbox stays off, ADS stays disabled
+    // and the low-health grade stays latched — at full health. respawn() got
+    // this right via reset(true); the direct heal path did not.
+    if (this.value > 0 && this.dead) {
+      this.dead = false;
+      this._emitState(true);
+    }
   }
 
   addSuppression(a) {

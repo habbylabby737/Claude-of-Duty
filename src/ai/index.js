@@ -704,6 +704,13 @@ export class AiSystem {
       surfaceType: 'metal',
     });
     this._grenades.push({ body, mesh, fuse: 2.35, agent });
+
+    // Tell the player. `ui.spawnGrenade` draws the danger marker and fires the
+    // `grenade_warn` beeps, and it was fully built with ZERO gameplay callers —
+    // so a live 120-damage / 6.5m grenade landed with no warning at all, its
+    // only cue a 5cm sphere. The marker tracks the thrown body rather than the
+    // throw origin, so it follows the arc and settles where the grenade rests.
+    this.ctx.peek('ui')?.spawnGrenade?.(body?.position ?? from, 2.35);
     agent.animator.fire(0.35);
   }
 
