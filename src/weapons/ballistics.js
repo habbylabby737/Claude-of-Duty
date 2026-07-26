@@ -84,6 +84,8 @@ export class ProjectileSim {
     p.age = 0;
     p.weapon = o.weapon ?? null;
     p.mask = o.mask;
+    /** Who fired this round; travels with it to the impact so credit is explicit. */
+    p.source = o.source ?? 'player';
     this.live.push(p);
     this.stats.fired++;
 
@@ -138,6 +140,9 @@ export class ProjectileSim {
             penetration: p.penetration,
             dropoff: 1,
             mask: p.mask,
+            // Carried from spawn() so `damage:dealt` says who fired. Defaults to
+            // 'player' because this sim only ever runs the local player's rounds.
+            source: p.source ?? 'player',
           });
           this.stats.impacts++;
           this._retire(p);

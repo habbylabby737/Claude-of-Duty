@@ -46,6 +46,15 @@ import { Agent, STATE } from './agent.js';
 import { Squad } from './squad.js';
 import { GroundShadows } from './grounding.js';
 
+/**
+ * Seconds a corpse stays before it is disposed and spliced out. Long enough that
+ * a kill reads as a kill and the ragdoll settles (it sleeps at ~1.2s), short
+ * enough that a long match does not accumulate bodies forever.
+ */
+const CORPSE_LINGER = 14;
+/** Quiet beat after the garrison is cleared, before the next squad arrives. */
+const REINFORCE_DELAY = 6;
+
 export class AiSystem {
   static id = 'ai';
   static deps = ['physics', 'world'];
@@ -75,6 +84,9 @@ export class AiSystem {
     this.debugLog = false;
     /** dev: force the garrison to spawn even in deterministic capture runs */
     this.forcePopulate = false;
+    /** Send a fresh squad once the garrison is cleared. Off in capture runs. */
+    this.reinforce = true;
+    this._clearFor = 0;
     this._navPending = true;
     this.stats = { agents: 0, alive: 0, navMs: 0, coverPts: 0, walkable: 0 };
 
@@ -321,6 +333,21 @@ export class AiSystem {
       if (!e || !e.target || !(e.target instanceof Agent)) return;
       const a = e.target;
       if (!a.alive) return;
+      // Friendly fire guard. `Agent.team` was assigned at spawn and never read,
+      // so every round that clipped a squadmate applied full damage: measured
+      // 25/25 agent damage events same-team, 5 of 6 enemies dead inside 20s with
+      // the player idle. The garrison was wiping itself out before contact.
+      // Includes SELF. The original guard exempted `e.source === a`, reasoning
+      // that a shooter should be able to hurt itself — but that only makes sense
+      // for blasts, and this is the bullet path. A round spawns at the muzzle,
+      // inside the shooter's own hitboxes, so it can trace straight into them:
+      // measured 38 of 39 same-team hits blocked with the 39th being an agent
+      // shooting itself for ~10 HP, which is why the garrison bled slowly with
+      // the player idle. A rifle round never legitimately damages its own firer.
+      if (e.source instanceof Agent && e.source.team === a.team) {
+        this.stats.friendlyBlocked = (this.stats.friendlyBlocked ?? 0) + 1;
+        return;
+      }
       const amount = e.amount * this._falloff(e.point);
       a.applyDamage(amount, e.headshot ? 'head' : e.part ?? 'torso', e.point ?? a.position, e.incident);
       if (!a.alive) e.killed = true;
@@ -334,6 +361,17 @@ export class AiSystem {
         const d = a.position.distanceTo(e.position) + 0.001;
         a.hear(e.position, 120);
         if (d > radius) continue;
+        // Same guard as the bullet path. `_updateGrenades` already puts
+        // `source: g.agent` on the payload and this handler ignored it, so a
+        // 120-damage / 6.5m blast hit the thrower's own squad at full strength.
+        // Invisible until the nav fix let agents move and actually use grenades:
+        // the garrison then lost 206 HP in 30s with the player idle and not one
+        // friendly BULLET blocked. Agents have no friendly-blast avoidance in
+        // targeting, so self-damage here is a defect, not difficulty.
+        if (e.source instanceof Agent && e.source.team === a.team) {
+          this.stats.friendlyBlastBlocked = (this.stats.friendlyBlastBlocked ?? 0) + 1;
+          continue;
+        }
         if (this.phys && !this.phys.lineOfSight(e.position, a.eye, this.phys.MASK.EXPLOSION)) continue;
         const f = 1 - d / radius;
         this._v.copy(a.position).sub(e.position).normalize();
@@ -485,11 +523,34 @@ export class AiSystem {
     const spawns = world?.spawnPoints ?? [];
     if (!spawns.length || !this.grid) return 0;
     const player = this.playerPosition(this._v3).clone();
+
+    // Spawns must be on the SAME walkable island as the player, or the squad is
+    // stranded before it starts. Measured on the unfixed build: 2 of 6 agents
+    // spawned inside 10-21 cell islands and never reached the fight at all.
+    const g = this.grid;
+    const playerComp = (() => {
+      if (!g?.comp) return -1;
+      const at = g.nearest(player.x, player.z, player.y);
+      return at >= 0 ? g.comp[at] : -1;
+    })();
+    const reachable = (pos) => {
+      if (playerComp < 0 || !g?.comp) return true; // unlabelled grid: no new restriction
+      const at = g.nearest(pos.x, pos.z, pos.y);
+      return at >= 0 && g.comp[at] === playerComp;
+    };
+
     // rank the spawn points by distance from the player, take the far half
-    const ranked = spawns
+    let ranked = spawns
       .map((s, i) => ({ s, i, d: s.position.distanceTo(player) }))
       .sort((a, b) => b.d - a.d)
       .filter((e) => e.d > 18);
+    const beforeReach = ranked.length;
+    const connected = ranked.filter((e) => reachable(e.s.position));
+    // Only apply the filter if it leaves us something to work with — a level
+    // whose spawns are all off-island should still populate rather than silently
+    // produce an empty garrison.
+    if (connected.length) ranked = connected;
+    this.stats.spawnsRejectedUnreachable = beforeReach - connected.length;
     if (!ranked.length) return 0;
 
     const variants = ['vanguard', 'irregular', 'breacher'];
@@ -511,12 +572,32 @@ export class AiSystem {
       for (const o of others) route.push(o.s.position.clone());
 
       for (let m = 0; m < per; m++) {
-        const jitterA = this.rng.range(0, Math.PI * 2);
-        const jitterR = this.rng.range(0.8, 3.2);
-        const p = anchor.position
-          .clone()
-          .add(new THREE.Vector3(Math.cos(jitterA) * jitterR, 0, Math.sin(jitterA) * jitterR));
-        const ci = this.grid.nearest(p.x, p.z, anchor.position.y, 6, 1.4);
+        // Filtering the ANCHOR is not enough: the 0.8-3.2m scatter below can
+        // land on a neighbouring island, and grid.nearest() will happily snap to
+        // a cell on a different component. That is how an agent still ended up
+        // stranded after the anchors were filtered. Resample the jitter until it
+        // lands on the player island, then fall back to the anchor cell itself.
+        const p = new THREE.Vector3();
+        let ci = -1;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const jitterA = this.rng.range(0, Math.PI * 2);
+          const jitterR = this.rng.range(0.8, 3.2);
+          p.copy(anchor.position).add(
+            new THREE.Vector3(Math.cos(jitterA) * jitterR, 0, Math.sin(jitterA) * jitterR)
+          );
+          const c = this.grid.nearest(p.x, p.z, anchor.position.y, 6, 1.4);
+          if (c < 0) continue;
+          if (playerComp < 0 || !g?.comp || g.comp[c] === playerComp) {
+            ci = c;
+            break;
+          }
+        }
+        if (ci < 0) {
+          // Every scatter sample was off-island: stand on the anchor itself,
+          // which reachable() already vetted.
+          ci = this.grid.nearest(anchor.position.x, anchor.position.z, anchor.position.y, 6, 1.4);
+          this.stats.spawnFellBackToAnchor = (this.stats.spawnFellBackToAnchor ?? 0) + 1;
+        }
         if (ci >= 0) {
           p.set(
             this.grid.worldX(ci % this.grid.nx),
@@ -524,6 +605,7 @@ export class AiSystem {
             this.grid.worldZ((ci / this.grid.nx) | 0)
           );
         } else {
+          p.copy(anchor.position);
           p.y = this.groundAt(p.x, p.z, anchor.position.y + 4);
         }
         const a = this.spawn(variants[(q * per + m) % variants.length], p, anchor.yaw + this.rng.signed() * 0.7, {
@@ -611,6 +693,7 @@ export class AiSystem {
         penetration: 0.9,
         maxDist: 200,
         mask: phys.MASK.BULLET,
+        source: agent,
       });
       if (impacts.length) end = impacts[0].point;
     }
@@ -695,6 +778,16 @@ export class AiSystem {
       surfaceType: 'metal',
     });
     this._grenades.push({ body, mesh, fuse: 2.35, agent });
+
+    // Tell the player. `ui.spawnGrenade` draws the danger marker and fires the
+    // `grenade_warn` beeps, and it was fully built with ZERO gameplay callers —
+    // so a live 120-damage / 6.5m grenade landed with no warning at all, its
+    // only cue a 5cm sphere. The marker tracks the thrown body rather than the
+    // throw origin, so it follows the arc and settles where the grenade rests.
+    // Pass the BODY, not its position: markers.spawnGrenade copies a bare vector
+    // by value, which pinned the marker at the throw point (11/11 throws never
+    // moved, up to 28.8m drift). Handing it the body lets it follow the arc.
+    this.ctx.peek('ui')?.spawnGrenade?.(body ?? from, 2.35);
     agent.animator.fire(0.35);
   }
 
@@ -753,11 +846,47 @@ export class AiSystem {
               `at y=${b.miny.toFixed(2)} sleeping=${a.ragdoll.sleeping}`
           );
         }
+        // Retire the corpse. `deadTime` was accumulated and fed NOTHING but the
+        // debug log above: no splice existed anywhere, and populate() only ever
+        // ran at boot. So bodies accumulated forever while the roster only ever
+        // shrank, and the level emptied permanently — a match you could not lose
+        // and, after the last kill, could not fight.
+        if (a.deadTime > CORPSE_LINGER) {
+          a.squad?.remove?.(a);
+          a.dispose();
+          this.agents.splice(i, 1);
+          i--;
+          this.stats.retired = (this.stats.retired ?? 0) + 1;
+        }
       }
     }
     this._updateGrenades(dt);
+    this._updateReinforcements(dt, alive);
     this.stats.agents = this.agents.length;
     this.stats.alive = alive;
+  }
+
+  /**
+   * Send a fresh squad once the garrison is cleared.
+   *
+   * `populate()` was written to be re-runnable — it re-ranks spawn points from
+   * the player's CURRENT position each call — but nothing ever called it after
+   * boot. Reinforcing on a timer rather than instantly gives the player the beat
+   * of quiet that makes a wave read as a wave.
+   */
+  _updateReinforcements(dt, alive) {
+    if (!this.reinforce || this._navPending) return;
+    if (alive > 0) {
+      this._clearFor = 0;
+      return;
+    }
+    this._clearFor += dt;
+    if (this._clearFor < REINFORCE_DELAY) return;
+    this._clearFor = 0;
+    const made = this.populate({ squads: 1, perSquad: 3 });
+    // No 'ai:reinforce' emit: nothing consumes it and the wiring gate would
+    // (correctly) flag it as an orphan. Read ai.stats.waves if you need this.
+    if (made) this.stats.waves = (this.stats.waves ?? 0) + 1;
   }
 
   lateUpdate() {
@@ -1083,6 +1212,20 @@ export class AiSystem {
   }
 
   /* ================================================================== */
+
+  /**
+   * HUD contact list for the minimap and compass.
+   *
+   * The UI asks for `ai.getHudActors()` (falling back to `ai.actors`); this
+   * subsystem's own list is named `agents`. Nothing bridged the two, so
+   * `_collectBlips()` bailed on a null list and the minimap rendered the player
+   * arrow and nothing else for the entire match. The Agent shape is already what
+   * the HUD wants — it reads `position`, `alive`, `friendly` and `yaw` directly —
+   * so this is purely the missing accessor.
+   */
+  getHudActors() {
+    return this.agents;
+  }
 
   dispose() {
     for (const off of this._off ?? []) off();

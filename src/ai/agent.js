@@ -24,6 +24,13 @@ import * as THREE from 'three';
 import { RIG } from './rig.js';
 import { Animator } from './animator.js';
 
+/**
+ * Seconds off the dominant nav component before an agent walks itself home.
+ * Long enough that a legitimate brief excursion (a rooftop, a ledge) is not
+ * yanked back; short enough that a stranded soldier is not a statue.
+ */
+const STRANDED_GRACE = 2.0;
+
 const STATE = {
   IDLE: 'idle',
   PATROL: 'patrol',
@@ -281,6 +288,11 @@ export class Agent {
 
     this._sense(dt);
     this._think(dt);
+    // AFTER _think, deliberately. Recovery has to override the destination the
+    // state machine just chose — running it before _think meant the recovery
+    // target was reassigned the same frame, which is why the first version fired
+    // 81 times in 3 minutes and still left agents off-island.
+    this._recoverIfStranded(dt);
     this._move(dt);
     this._shoot(dt);
     this._drive(dt);
@@ -693,18 +705,181 @@ export class Agent {
         if (this.stuckTimer > 1.1) {
           this.stuckTimer = 0;
           this.repathTimer = 0;
-          if (this.hasMoveTarget) this._goTo(this.moveTarget);
+          // ABANDON the destination; do not re-request it.
+          //
+          // This used to be `if (this.hasMoveTarget) this._goTo(this.moveTarget)`
+          // — a repath to the byte-identical target that just failed. Measured:
+          // 699 of 700 recovery fires requested the same destination, so an agent
+          // wedged against geometry stayed wedged forever. Individually they skate
+          // in place up to 62s; at garrison scale 2/2 free-running sessions had
+          // ALL SIX agents permanently immobile from ~2-3 min in, one of them
+          // silent for 166s. The walk animation runs off desired speed, so they
+          // visibly march on the spot.
+          //
+          // Releasing the cover claim matters as much as clearing the target: a
+          // held claim keeps the point out of every squadmate's pick list too.
+          this.stuckStrikes = (this.stuckStrikes ?? 0) + 1;
+          this.hasMoveTarget = false;
+          this.pathPending = false;
+          this.pathLen = 0;
+          if (this.cover) {
+            this.cover = null;
+            this.ai.cover?.release(this.id); // same convention as the drop at ~505
+          }
+          // Two strikes in a row means the local geometry is the problem, not the
+          // destination. Force a reposition away from the obstruction so the next
+          // pick is solved from somewhere else.
+          if (this.stuckStrikes >= 2) {
+            this.stuckStrikes = 0;
+            this._nudgeOffObstruction();
+          }
         }
-      } else this.stuckTimer = 0;
+      } else {
+        this.stuckTimer = 0;
+        this.stuckStrikes = 0;
+      }
     } else {
       this.position.x += this._steer.x * this.speed * dt;
       this.position.z += this._steer.z * this.speed * dt;
     }
   }
 
+  /**
+   * Step out of a wedge.
+   *
+   * Clearing the destination alone is not always enough: if the agent is pinned
+   * against geometry, the next pick is solved from the same bad spot and it wedges
+   * again immediately. Two strikes means the local geometry is the problem, so
+   * take a short lateral step first and let the next decision run from somewhere
+   * else. Sideways before backwards — retreating reads as fleeing.
+   */
+  _nudgeOffObstruction() {
+    const grid = this.ai.grid;
+    if (!grid) return false;
+    const s = this._steer;
+    let dx = s.x, dz = s.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-3) {
+      dx = Math.sin(this.yaw);
+      dz = Math.cos(this.yaw);
+    } else {
+      dx /= len;
+      dz /= len;
+    }
+    const here = grid.nearest(this.position.x, this.position.z, this.position.y);
+    const myComp = here >= 0 && grid.comp ? grid.comp[here] : -1;
+    // perpendicular both ways, then straight back
+    const dirs = [
+      [-dz, dx],
+      [dz, -dx],
+      [-dx, -dz],
+    ];
+    for (const [ox, oz] of dirs) {
+      for (const dist of [1.6, 2.6]) {
+        const tx = this.position.x + ox * dist;
+        const tz = this.position.z + oz * dist;
+        const ci = grid.nearest(tx, tz, this.position.y);
+        if (ci < 0) continue;
+        if (myComp >= 0 && grid.comp && grid.comp[ci] !== myComp) continue;
+        this._v2.set(
+          grid.worldX(ci % grid.nx),
+          grid.floor[ci],
+          grid.worldZ((ci / grid.nx) | 0)
+        );
+        if (this._goTo(this._v2)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Walk home if stranded on a disconnected nav island.
+   *
+   * Blocking bad vaults (see _tryVault) closes the main door onto the islands but
+   * not all of them: the character controller can also walk seams the grid marks
+   * unwalkable (measured 23 vault-caused vs 7 walk-caused strandings). Once off,
+   * findPath and CoverMap.pick correctly reject every destination, so the agent
+   * has no way back and simply stops forever — 0 of 99 off-island entries longer
+   * than 3s ever recovered on their own.
+   *
+   * Recovery deliberately ignores the component guard it would otherwise trip:
+   * it walks toward the nearest cell of the dominant component using the straight
+   * move path, because pathfinding to it is by definition impossible from here.
+   */
+  _recoverIfStranded(dt) {
+    const grid = this.ai.grid;
+    if (!grid?.comp || grid.largestComponent < 0) return;
+
+    const at = grid.nearest(this.position.x, this.position.z, this.position.y);
+    const comp = at >= 0 ? grid.comp[at] : -1;
+    if (comp === grid.largestComponent) {
+      this.strandedFor = 0;
+      this._hasExit = false; // home; drop the cached exit
+      return;
+    }
+
+    this.strandedFor = (this.strandedFor ?? 0) + dt;
+    if (this.strandedFor < STRANDED_GRACE) return;
+
+    const nx = grid.nx;
+
+    // Recompute the exit only when we have none. The scan is O(cells) and the
+    // destination does not move, so caching it is the difference between a
+    // once-per-strand cost and a per-frame one.
+    if (!this._exit) this._exit = new THREE.Vector3();
+    if (!this._hasExit) {
+      let best = -1;
+      let bestD = Infinity;
+      for (let i = 0; i < grid.comp.length; i++) {
+        if (grid.comp[i] !== grid.largestComponent) continue;
+        const cx = grid.worldX(i % nx);
+        const cz = grid.worldZ((i / nx) | 0);
+        const d = (cx - this.position.x) ** 2 + (cz - this.position.z) ** 2;
+        if (d < bestD) {
+          bestD = d;
+          best = i;
+        }
+      }
+      if (best < 0) return;
+      this._exit.set(grid.worldX(best % nx), grid.floor[best], grid.worldZ((best / nx) | 0));
+      this._hasExit = true;
+      this.ai.stats.strandRecoveries = (this.ai.stats.strandRecoveries ?? 0) + 1;
+    }
+
+    // Re-assert EVERY frame while stranded. _think reassigns moveTarget from its
+    // own state each frame, so setting this once (or once per grace window) just
+    // got overwritten — the agent kept "recovering" and never moved.
+    //
+    // Write a ONE-WAYPOINT path, not `pathLen = 0`. _move only steers toward
+    // `path[pathIndex]` while `pathIndex < pathLen`; with pathLen 0 there is no
+    // waypoint, so the "straight-line walk" I first wrote produced a perfectly
+    // recovered destination and zero movement. There is no straight-line mode.
+    this.moveTarget.copy(this._exit);
+    this.hasMoveTarget = true;
+    if (!this.path[0]) this.path[0] = new THREE.Vector3();
+    this.path[0].copy(this._exit);
+    this.pathLen = 1;
+    this.pathIndex = 0;
+    this.pathPending = false;
+    this.desiredSpeed = Math.max(this.desiredSpeed, this.runSpeed ?? 3.5);
+  }
+
   _tryVault() {
     const phys = this.phys;
-    const fwd = this._v.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
+    // Probe along TRAVEL, not facing.
+    //
+    // `fwd` was built from this.yaw, which points at the THREAT whenever the
+    // agent is engaged — so a soldier running left while shooting right vaulted
+    // to the right. Measured: 55 of 117 vaults had dot(facing, steer) < 0.3
+    // (worst -0.987, i.e. a backward hop), including one 13-vault backward loop
+    // firing every ~3s for 27s. 14 of 117 changed nav component, all onto islands
+    // of <=40 cells, which made this the main feeder for permanent stranding.
+    const s = this._steer;
+    const sl = Math.hypot(s.x, s.z);
+    const fwd =
+      sl > 1e-3
+        ? this._v.set(s.x / sl, 0, s.z / sl)
+        : this._v.set(Math.sin(this.yaw), 0, Math.cos(this.yaw));
     const low = phys.raycast(
       this.position.x, this.position.y + 0.35, this.position.z,
       fwd.x, 0, fwd.z, 0.85, phys.MASK.WORLD
@@ -720,6 +895,35 @@ export class Agent {
     const lz = this.position.z + fwd.z * 1.5;
     const y = this.ai.groundAt(lx, lz, this.position.y + 2.2);
     if (!Number.isFinite(y) || Math.abs(y - this.position.y) > 1.3) return;
+
+    // Never vault off your own island.
+    //
+    // The landing spot was validated by HEIGHT DELTA ONLY. Nothing checked that
+    // it was still navigable from here, so vaulting was a one-way door onto a
+    // disconnected component: 14 of 117 vaults changed component, and once off,
+    // findPath and CoverMap.pick reject everything forever. Measured 0 of 99
+    // off-island entries longer than 3s EVER recovered; 5/5 sessions had at least
+    // one agent frozen 55-86s of a 90s fight.
+    // The rule is ASYMMETRIC: block vaults that LEAVE the dominant component,
+    // allow any vault that lands on it.
+    //
+    // The first version rejected every component change symmetrically, which
+    // trapped the very agents it was meant to protect: a soldier already on an
+    // island could not vault back, and hammered the guard 933 times in 3 minutes
+    // while standing still. Leaving the main island is a one-way door worth
+    // closing; returning to it is the rescue.
+    const grid = this.ai.grid;
+    if (grid?.comp && grid.largestComponent >= 0) {
+      const from = grid.nearest(this.position.x, this.position.z, this.position.y);
+      const to = grid.nearest(lx, lz, y);
+      const fromComp = from >= 0 ? grid.comp[from] : -1;
+      const toComp = to >= 0 ? grid.comp[to] : -1;
+      const leavingHome = fromComp === grid.largestComponent && toComp !== grid.largestComponent;
+      if (leavingHome) {
+        this.ai.stats.vaultRejectedOffIsland = (this.ai.stats.vaultRejectedOffIsland ?? 0) + 1;
+        return;
+      }
+    }
     this.vaultCooldown = 2.5;
     this.animator.vault(0.8);
     this.vaultFrom = (this.vaultFrom ?? new THREE.Vector3()).copy(this.position);

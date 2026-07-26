@@ -35,6 +35,21 @@ export class Squad {
     return agent;
   }
 
+  /**
+   * Drop a disposed member. Without this, corpse cleanup would leave dangling
+   * agents in `members` forever: `alive` would still walk them, peek tokens
+   * would be sized off a roster that no longer exists, and every squad query
+   * would get slower for the rest of the session.
+   */
+  remove(agent) {
+    const i = this.members.indexOf(agent);
+    if (i < 0) return false;
+    this.members.splice(i, 1);
+    if (agent.squad === this) agent.squad = null;
+    this.peekTokens = Math.max(1, Math.round(this.members.length * 0.5));
+    return true;
+  }
+
   get alive() {
     let n = 0;
     for (const m of this.members) if (m.alive) n++;

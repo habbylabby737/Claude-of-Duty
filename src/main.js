@@ -12,6 +12,7 @@ import { FxSystem } from './fx/index.js';
 import { AiSystem } from './ai/index.js';
 import { UiSystem } from './ui/index.js';
 import { AudioSystem } from './audio/index.js';
+import { MatchSystem } from './match/index.js';
 
 import { installShotApi } from './dev/shots.js';
 import { prewarm } from './core/prewarm.js';
@@ -24,8 +25,30 @@ const capture = params.get('capture') === '1';
 // free-run. See the long comment in src/dev/shots.js.
 const lockstep = capture && params.get('lockstep') === '1';
 
+// Default quality: measured, not aspirational.
+//
+// This shipped as 'ultra' with no adaptive scaler and no runtime downgrade path — the
+// only caller of config.setQuality() is the settings menu, so unless a player went
+// looking, every session ran ultra at ~14fps.
+//
+// Measured, M-series Mac, Metal ANGLE, vsync off, tools/perf.mjs, median fps:
+//                720p  1080p  1440p   drawCalls   tris
+//   ultra          19     14      9        1395   10.3M
+//   high           21     11     10        1362   10.2M
+//   medium         32     21     14        1146    8.4M
+//   low            32     17     12        1146    8.4M
+//
+// 'medium' wins at every resolution, so it is the default. Note what the numbers say:
+// ultra->high changes almost nothing because the presets scale shadow resolution and
+// post passes, NOT submitted geometry — draw calls and triangle count barely move. The
+// real cost is ~8.4M triangles over ~1150 draw calls, and no preset fixes that. Even
+// 'medium' is only 21fps at 1080p. Genuine playability needs batching/instancing work
+// on the geometry submission path, which is deliberately out of scope here.
+//
+// `?q=ultra` restores the original behaviour for capture work, which is the only place
+// it was ever affordable.
 const config = createConfig({
-  quality: params.get('q') ?? 'ultra',
+  quality: params.get('q') ?? 'medium',
   deterministic: capture,
 });
 
@@ -45,7 +68,8 @@ engine
   .add(FxSystem)
   .add(AiSystem)
   .add(UiSystem)
-  .add(AudioSystem);
+  .add(AudioSystem)
+  .add(MatchSystem);
 
 try {
   await engine.init();

@@ -1,0 +1,30 @@
+{
+  "_README": "Accepted findings for tools/gate-wiring.mjs. An entry here is a DECISION, not a snooze: every one needs a reason below. Anything without a written justification does not belong in this file — the gate is allowed to stay red while real defects are open.",
+
+  "_methods_reasons": {
+    "debugPose": "weapons debug-only; driven from src/weapons/preview.js harness, not gameplay",
+    "debugStage": "ai capture-only; staged tableau for screenshots, invoked from the shot harness",
+    "setFromObject": "physics helper used by the weapons preview harness only",
+    "setAdsProgress": "player feel-test harness (src/player/feeltest.mjs) only",
+    "patchMaterials": "render internal, invoked through the material system during init",
+    "requestEnvMap": "render internal, driven by the sky subsystem probe cycle"
+  },
+  "methods": [
+    "debugPose",
+    "debugStage",
+    "setFromObject",
+    "setAdsProgress",
+    "patchMaterials",
+    "requestEnvMap"
+  ],
+
+  "_events_reasons": {
+    "ui:pause": "SUPPLEMENTARY, verified not a defect. The gate flagged this and I wrongly concluded the game never pauses (menu.js:183 even says 'while the game is frozen', and grepping engine.js for 'time.scale' found nothing). Reading the code refuted it: menu.open() sets t.scale=0 and calls player.setControlEnabled(false); engine.js:125 computes t.dt = rawDt * t.scale, so update/lateUpdate receive dt=0 AND engine.js:130 _accum += t.dt keeps the fixed-step loop from running at all. Physics and AI both freeze. My grep missed it because the code aliases this.time to `t`. The event is a notification for anyone who wants it.",
+    "ui:quality": "SUPPLEMENTARY. menu.js:136 calls ctx.config.setQuality(name) DIRECTLY, then emits. The setting applies without any listener.",
+    "ui:sensitivity": "SUPPLEMENTARY. menu.js:42 assigns ctx.config.sensitivity directly, then emits.",
+    "ui:fov": "SUPPLEMENTARY. menu.js:48 assigns ctx.config.fov and updates the camera directly, then emits.",
+    "ui:setting": "SUPPLEMENTARY. Generic settings-changed notification; every individual setting is already applied at its own call site.",
+    "_still_open": "player:health, player:heartbeat, sky:changed, sky:env and the ai:bark dead subscription are NOT allow-listed - they have not been adjudicated yet and stay red until they are."
+  },
+  "events": ["ui:pause", "ui:quality", "ui:sensitivity", "ui:fov", "ui:setting"]
+}

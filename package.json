@@ -18,5 +18,8 @@
     "pngjs": "^7.0.0",
     "vite": "^7.3.6"
   },
-  "private": true
+  "private": true,
+  "overrides": {
+    "postcss": "8.5.6"
+  }
 }

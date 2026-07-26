@@ -218,6 +218,8 @@ export class PhysicsSystem {
     }
     this._impactCursor = 0;
     this._impactResult = [];
+    /** Who is firing right now; set for the synchronous span of fireBullet(). */
+    this._firingSource = null;
 
     this._raw = makeHitRecord();
     this._raw2 = makeHitRecord();
@@ -705,12 +707,30 @@ export class PhysicsSystem {
    * Emits `bullet:impact` for every entry and every exit.
    * Returns an array of impact records (reused; copy what you keep).
    */
+  /**
+   * `opts.source` identifies WHO fired. It is stashed for the duration of the
+   * call rather than threaded through ballistics/penetration, because the whole
+   * chain (fire -> penetration solver -> emitImpact) is synchronous and this
+   * keeps two module signatures untouched.
+   *
+   * Without it, `damage:dealt` was anonymous, and both consumers guessed:
+   * `ai` applied every round to any Agent it hit with no team check, and `ui`
+   * credited the player with any kill whose target was not the player. Measured
+   * result: 25/25 agent damage events were same-team, 5 of 6 enemies killed each
+   * other inside 20s, and the player scored 5 without firing a shot.
+   */
   fireBullet(opts) {
-    const n = this.ballistics.fire({ rng: this.rng, ...opts });
-    const res = this._impactResult;
-    res.length = 0;
-    for (let i = 0; i < n; i++) res.push(this.ballistics.impacts[i]);
-    return res;
+    const prev = this._firingSource;
+    this._firingSource = opts?.source ?? null;
+    try {
+      const n = this.ballistics.fire({ rng: this.rng, ...opts });
+      const res = this._impactResult;
+      res.length = 0;
+      for (let i = 0; i < n; i++) res.push(this.ballistics.impacts[i]);
+      return res;
+    } finally {
+      this._firingSource = prev;
+    }
   }
 
   emitImpact(px, py, pz, nx, ny, nz, dx, dy, dz, si, damage, exit, hit) {
@@ -736,6 +756,9 @@ export class PhysicsSystem {
         headshot: hit?.part === 'head',
         killed: false,
         point: p.point,
+        // Who fired. Set by fireBullet() for the duration of the trace. Consumers
+        // MUST branch on this rather than inferring identity from the target.
+        source: this._firingSource ?? null,
       });
     }
   }
