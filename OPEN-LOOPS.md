@@ -30,6 +30,32 @@ that moment was silently discarded and audio started anyway — button still rea
 
 ---
 
+## ⛔ WORK STOPPED DELIBERATELY — 2026-07-25
+
+**~57 rows below and in the two fix queues are KNOWN-OPEN, not abandoned.**
+
+Reason: the goal was always better skills (especially for Codex); fixing this demo was
+instrumental. The core loop is fixed and verified — death/respawn, friendly fire, nav connectivity,
+agent mobility, corpse lifecycle, match state. What remains is polish on a tech demo nobody is
+shipping (e.g. *"43% of grenade throws hit the wall in front of the thrower"*).
+
+Two facts made continuing negative-value:
+1. **The thesis was proven** — 5+ integration-gap defects in the original, **4 introduced by me**
+   while documenting the class. Instance #10 carries no new information.
+2. **My marginal fix now costs more than it returns** — I introduce these bugs at roughly the
+   original authors' rate; only the gate and the suite catch them.
+
+The transferable value was extracted instead: **`~/.codex/skills/unwired-seams/`** (symlinked into
+`~/.claude/skills/`) — the wiring gate, generalised, with a planted-defect self-test and the case
+study. That runs on any repo, including Matthew's Codex-built games.
+
+**To resume:** `fork/FIX-QUEUE.md` (24 rows) and `fork/FIX-QUEUE-DELTA.md` (19 rows) are complete
+and prioritised. Highest remaining: N5 (one round deals 2–5× listed damage through stacked hit
+capsules, up to 163 HP from a 33-damage round), N7 (agents weapon-down up to 63s in the open),
+2.2 (false killfeed row per kill), 2.1 (ADS lands 6.7 cm low).
+
+10 commits sit on `fix/core-loop`, **unpushed by choice**. Full suite green.
+
 ## OPEN
 
 | # | What | Evidence | Closes when | Owner | State |
