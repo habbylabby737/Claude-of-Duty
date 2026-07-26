@@ -74,7 +74,7 @@ Every one has an executable check. Nothing was called done on assertion.
 | `0c513c8` | core loop: death→respawn, match clock, `scoreThem`, minimap blips | `verify-match` 11/12 |
 | `15127bd` | audio mute (button + `M`), init-order-safe | 6/6 |
 | `0c17f00` | **RC-1** shooter identity → friendly-fire guard + player-credit gate | `verify-friendlyfire` 8/8 |
-| `55ac1a0` | **the wiring gate** | fires on original (24), fork 14 |
+| `55ac1a0` | **the wiring gate** | fires on original (17), fork 14 |
 | `15064d4` | grenade danger warning + `heal()` dead latch | `verify-p0` 5/5 |
 | `b5cfe98` | **RC-3** nav connectivity + explosion friendly fire | `verify-nav` 6/6 |
 | `05f8d0d` | corpse retirement + reinforcement waves | `verify-lifecycle` 6/6 |
@@ -105,7 +105,7 @@ npx vite --port 5373 --strictPort &        # dev server; port 5173/5273 belong t
 
 # static gate — no server needed
 node tools/gate-wiring.mjs                      # expect 14 known-open findings
-node tools/gate-wiring.mjs --root ../original   # expect 24, incl. player:death, respawn(), setMatch()
+node tools/gate-wiring.mjs --root ../original   # expect 17, incl. player:death, respawn(), setMatch()
 
 # runtime suite — needs the dev server
 for t in match friendlyfire p0 nav lifecycle endgame mobility; do
@@ -119,6 +119,18 @@ normal play, not a bug)*, friendlyfire 8/8, p0 5/5, nav 6/6, lifecycle 6/6, endg
 ```bash
 node ~/.codex/skills/unwired-seams/scripts/gate-wiring.test.mjs    # expect 10/10
 ```
+
+> **Corrected 2026-07-26 — two different instruments, two different numbers.** This file previously
+> said the project gate reports **24** on `original`. It reports **17**. The 24 belongs to the
+> *generalised skill* gate, which is a different, more sensitive tool with a different CLI
+> (positional roots, not `--root`), and it scans `tools/` as well:
+> ```bash
+> node ~/.codex/skills/unwired-seams/scripts/gate-wiring.mjs ./original/src ./original/tools --api-check   # 24
+> node ~/.codex/skills/unwired-seams/scripts/gate-wiring.mjs ./fork/src     ./fork/tools     --api-check   # 21
+> ```
+> Both numbers were real; the runbook bound the skill gate's result to the project gate's command.
+> Project gate: original **17** / fork **14** — internally consistent, the delta being exactly the
+> three seams the fixes closed (`player:death`, `respawn()`, `setMatch()`).
 
 ---
 
