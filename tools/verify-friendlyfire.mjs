@@ -30,6 +30,15 @@ p.on('pageerror', (e) => console.log('[PAGEERROR]', String(e).slice(0, 300)));
 await p.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded' });
 await p.waitForFunction('window.__READY__===true', null, { timeout: 300000 });
 
+// Pin the roster. Reinforcement waves (added later, for 2.4) can spawn a fresh
+// squad mid-run, which makes the "alive went down by exactly one" positive
+// control flaky — it measured 6/8 on one suite pass and 8/8 on the next for that
+// reason alone. The friendly-fire property under test is independent of waves.
+await p.evaluate(() => {
+  const ai = window.__ENGINE__.ctx.peek('ai');
+  ai.reinforce = false;
+});
+
 // Count same-team damage applications and player credit as they happen.
 await p.evaluate(() => {
   const e = window.__ENGINE__;

@@ -337,7 +337,14 @@ export class AiSystem {
       // so every round that clipped a squadmate applied full damage: measured
       // 25/25 agent damage events same-team, 5 of 6 enemies dead inside 20s with
       // the player idle. The garrison was wiping itself out before contact.
-      if (e.source instanceof Agent && e.source !== a && e.source.team === a.team) {
+      // Includes SELF. The original guard exempted `e.source === a`, reasoning
+      // that a shooter should be able to hurt itself — but that only makes sense
+      // for blasts, and this is the bullet path. A round spawns at the muzzle,
+      // inside the shooter's own hitboxes, so it can trace straight into them:
+      // measured 38 of 39 same-team hits blocked with the 39th being an agent
+      // shooting itself for ~10 HP, which is why the garrison bled slowly with
+      // the player idle. A rifle round never legitimately damages its own firer.
+      if (e.source instanceof Agent && e.source.team === a.team) {
         this.stats.friendlyBlocked = (this.stats.friendlyBlocked ?? 0) + 1;
         return;
       }
@@ -777,7 +784,10 @@ export class AiSystem {
     // so a live 120-damage / 6.5m grenade landed with no warning at all, its
     // only cue a 5cm sphere. The marker tracks the thrown body rather than the
     // throw origin, so it follows the arc and settles where the grenade rests.
-    this.ctx.peek('ui')?.spawnGrenade?.(body?.position ?? from, 2.35);
+    // Pass the BODY, not its position: markers.spawnGrenade copies a bare vector
+    // by value, which pinned the marker at the throw point (11/11 throws never
+    // moved, up to 28.8m drift). Handing it the body lets it follow the arc.
+    this.ctx.peek('ui')?.spawnGrenade?.(body ?? from, 2.35);
     agent.animator.fire(0.35);
   }
 

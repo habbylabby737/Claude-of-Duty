@@ -174,10 +174,24 @@ export class WorldMarkers {
   }
 
   /** @param {number} fuse seconds until detonation */
+  /**
+   * @param {object} position world position, or a live body/object whose
+   *   `.position` is followed each frame.
+   * @param {number} fuse seconds until detonation.
+   *
+   * The marker MUST track the grenade, not the throw point. Copying by value
+   * pinned the pips wherever the AI released the grenade: measured 11/11 throws
+   * with the marker never moving, up to 28.8m of drift, and the DANGER CLOSE
+   * threshold (measured against the stale point) never firing — including on 6
+   * detonations that went off inside the blast radius of the player. A grenade
+   * at your feet was drawn on the horizon.
+   */
   spawnGrenade(position, fuse = 2.4) {
     const it = this.nadePool.acquire();
     it.life = fuse;
-    it.node._pos.copy(position);
+    // Follow a live body when given one; otherwise treat it as a fixed point.
+    it.follow = position && position.position ? position : null;
+    it.node._pos.copy(it.follow ? it.follow.position : position);
     return it;
   }
 
@@ -189,10 +203,15 @@ export class WorldMarkers {
       if (!it.alive) continue;
       it.t += dt;
       if (it.t >= it.life) {
+        it.follow = null; // do not let a retired marker pin a rigid body alive
         this.nadePool.release(it);
         continue;
       }
       const node = it.node;
+      // Refresh from the live body each frame. When the body is gone (removed at
+      // detonation) the last known position is kept, so the marker finishes its
+      // pulse where the grenade actually was rather than snapping back.
+      if (it.follow?.position) node._pos.copy(it.follow.position);
       const p = project(node._pos, camera, w, h, margin);
       setStyle(node, 'transform', `translate(${p.x.toFixed(1)}px,${p.y.toFixed(1)}px)`);
       const close = p.dist < 9;

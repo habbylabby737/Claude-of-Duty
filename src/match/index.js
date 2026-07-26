@@ -27,6 +27,9 @@ const MATCH = {
   scoreLimit: 75,
 };
 
+/** Enough to fully restore from any state; heal() clamps to max. */
+const HEALTH_FULL = 1000;
+
 export class MatchSystem {
   static id = 'match';
   /** ui for the HUD contract, player for respawn. Both are hard requirements. */
@@ -57,7 +60,17 @@ export class MatchSystem {
   _onPlayerDeath() {
     // `player:death` fires from inside Health.damage(). Guard re-entry: a burst can
     // land several rounds in one frame, and only the first should count as a death.
-    if (this.awaitingRespawn || this.over) return;
+    if (this.awaitingRespawn) return;
+
+    // Round already over. Do NOT start a respawn cycle — but never leave the
+    // player as a 0-HP corpse either. Returning bare here produced a permanent
+    // invulnerable-but-controllable body: damage() returns 0 while dead and
+    // nothing else in the build calls heal(), so the state was terminal.
+    // heal() clears the dead flag as of the 1.3b fix, so this is a full recovery.
+    if (this.over) {
+      this.ctx.peek('player')?.health?.heal?.(HEALTH_FULL);
+      return;
+    }
 
     this.awaitingRespawn = true;
     this.respawnIn = MATCH.respawnDelay;
@@ -97,12 +110,20 @@ export class MatchSystem {
   /* ------------------------------------------------------------------ frame -- */
 
   update(dt) {
-    if (this.over) return;
-
+    // The respawn countdown services FIRST, and unconditionally.
+    //
+    // This used to sit below an `if (this.over) return;`, which made _end('time')
+    // the last frame that ever decremented respawnIn. Dying as the clock ran out
+    // therefore froze the player permanently: 0 HP, control disabled, respawnIn
+    // stuck mid-count, no restart in the pause menu, and the only exit a page
+    // reload. Measured: respawnIn frozen at 1.483 for 58s of game time with W held
+    // and zero movement.
     if (this.awaitingRespawn) {
       this.respawnIn -= dt;
       if (this.respawnIn <= 0) this._respawn();
     }
+
+    if (this.over) return;
 
     const before = this.timeLeft;
     this.timeLeft = Math.max(0, this.timeLeft - dt);
@@ -132,6 +153,13 @@ export class MatchSystem {
     const scoreUs = ui?.state?.scoreUs ?? 0;
     const won = scoreUs > this.scoreThem;
     ui?.banner?.show?.(won ? 'Victory' : 'Defeat', `${scoreUs} — ${this.scoreThem}`, 8);
+
+    // Never end a round with the player mid-death. If a respawn was pending, run
+    // it now rather than stranding them; otherwise just make sure control is back.
+    // Without this, the round-end banner could appear over a frozen corpse.
+    const player = this.ctx.peek('player');
+    if (this.awaitingRespawn) this._respawn();
+    else player?.setControlEnabled?.(true);
     // Same reasoning as the respawn emit: the banner above IS the consumer. A
     // `match:end` broadcast with no subscriber would just be another orphan.
     // Read `match.over` / `match.scoreThem` directly if you need round state.

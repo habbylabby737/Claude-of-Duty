@@ -341,6 +341,10 @@ export class WeaponSystem {
   tryFire() {
     const s = this.state;
     if (!s) return false;
+    // Corpses do not shoot. Gating only the input path was not enough — this is
+    // the authority for "a round leaves the barrel", so the guard belongs here
+    // too, where every caller passes through it regardless of how it was reached.
+    if (this.player?.health?.dead === true) return false;
     if (this.reloading || this.switching || this._fireTimer > 0) return false;
     if (!s.chambered) {
       // Dry: lock the bolt back and let the player know by feel.
@@ -597,7 +601,13 @@ export class WeaponSystem {
     if (this._sinceShot > 0.6) this._shotIndex = 0;
 
     // ---- gather state ----------------------------------------------------
-    const live = !input.frozen && input.enabled !== false && this.debugMode === null;
+    // A dead player must not shoot. `setControlEnabled(false)` only gates MOVEMENT
+    // (player/index.js:617 touches this.movement), so a corpse kept full trigger
+    // authority: measured 30 -> 13 -> 0 rounds fired while dead, respawning with
+    // the emptied magazine, and kills during that window fully credited with XP
+    // and score. The weapon system owns firing, so the gate belongs here.
+    const dead = player?.health?.dead === true;
+    const live = !dead && !input.frozen && input.enabled !== false && this.debugMode === null;
     st.ads = live ? input.ads || player?.adsRequested === true : this.debugMode === 'ads';
     st.sprint = live ? player?.sprinting === true && this._sinceShot > 0.3 : false;
     st.speed = player?.horizontalSpeed ?? player?.speed ?? 0;
