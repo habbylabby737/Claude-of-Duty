@@ -87,7 +87,10 @@ export class MatchSystem {
     player.respawn(this._deaths);
     player.setControlEnabled?.(true);
 
-    this.ctx.events.emit('player:respawn', { index: this._deaths });
+    // No `player:respawn` emit here on purpose. Nothing consumes it, and an
+    // event with no subscriber is the exact defect class this fork exists to
+    // remove — tools/gate-wiring.mjs flags it. Re-add it the moment a real
+    // consumer exists (audio respawn cue, analytics), not before.
     this._publish();
   }
 
@@ -129,7 +132,9 @@ export class MatchSystem {
     const scoreUs = ui?.state?.scoreUs ?? 0;
     const won = scoreUs > this.scoreThem;
     ui?.banner?.show?.(won ? 'Victory' : 'Defeat', `${scoreUs} — ${this.scoreThem}`, 8);
-    this.ctx.events.emit('match:end', { reason, scoreUs, scoreThem: this.scoreThem, won });
+    // Same reasoning as the respawn emit: the banner above IS the consumer. A
+    // `match:end` broadcast with no subscriber would just be another orphan.
+    // Read `match.over` / `match.scoreThem` directly if you need round state.
   }
 
   dispose() {

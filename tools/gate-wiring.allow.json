@@ -1,0 +1,25 @@
+{
+  "_README": "Accepted findings for tools/gate-wiring.mjs. An entry here is a DECISION, not a snooze: every one needs a reason below. Anything without a written justification does not belong in this file — the gate is allowed to stay red while real defects are open.",
+
+  "_methods_reasons": {
+    "debugPose": "weapons debug-only; driven from src/weapons/preview.js harness, not gameplay",
+    "debugStage": "ai capture-only; staged tableau for screenshots, invoked from the shot harness",
+    "setFromObject": "physics helper used by the weapons preview harness only",
+    "setAdsProgress": "player feel-test harness (src/player/feeltest.mjs) only",
+    "patchMaterials": "render internal, invoked through the material system during init",
+    "requestEnvMap": "render internal, driven by the sky subsystem probe cycle"
+  },
+  "methods": [
+    "debugPose",
+    "debugStage",
+    "setFromObject",
+    "setAdsProgress",
+    "patchMaterials",
+    "requestEnvMap"
+  ],
+
+  "_events_reasons": {
+    "_none_yet": "No event is allow-listed. Every orphaned emit currently reported is either an open defect (ui:pause, ai:bark, player:heartbeat) or an extension point I introduced and have not yet justified (match:end, player:respawn). Allow-listing my own orphans would be exactly the excuse this gate exists to refuse."
+  },
+  "events": []
+}
